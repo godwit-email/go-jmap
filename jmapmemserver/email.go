@@ -106,7 +106,7 @@ func (s *Server) emailQuery(args *queryArgs) (*email.QueryResponse, *jmap.Method
 		}
 		asc = c.IsAscending
 	}
-	var ids []jmap.ID
+	ids := []jmap.ID{}
 	for _, e := range s.emails {
 		if args.match(e) {
 			ids = append(ids, e.ID)
@@ -128,7 +128,7 @@ func (s *Server) emailQuery(args *queryArgs) (*email.QueryResponse, *jmap.Method
 	if int(args.Position) < len(ids) {
 		ids = ids[args.Position:]
 	} else {
-		ids = nil
+		ids = []jmap.ID{}
 	}
 	if args.Limit > 0 && uint64(len(ids)) > args.Limit {
 		ids = ids[:args.Limit]

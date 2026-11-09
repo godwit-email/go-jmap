@@ -40,7 +40,7 @@ type QueryResponse struct {
 
 	Position uint64 `json:"position,omitempty"`
 
-	IDs []jmap.ID `json:"ids,omitempty"`
+	IDs []jmap.ID `json:"ids"`
 
 	Total uint64 `json:"total,omitempty"`
 

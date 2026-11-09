@@ -302,3 +302,21 @@ func TestRedirect(t *testing.T) {
 	s.Redirect("/.well-known/jmap", "")
 	newClient(t, s)
 }
+
+func TestEmptyQueryFeedsResultReference(t *testing.T) {
+	s := jmapmemserver.New("alice", "secret")
+	defer s.Close()
+	inbox := s.CreateMailbox("Inbox", mailbox.RoleInbox)
+
+	c := newClient(t, s)
+	req := &jmap.Request{}
+	q := req.Invoke(&email.Query{Account: s.AccountID(), Filter: &email.FilterCondition{InMailbox: inbox}})
+	req.Invoke(&email.Get{Account: s.AccountID(), ReferenceIDs: &jmap.ResultReference{ResultOf: q, Name: "Email/query", Path: "/ids"}})
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gr, ok := resp.Responses[1].Args.(*email.GetResponse); !ok || len(gr.List) != 0 {
+		t.Fatalf("Email/get = %#v", resp.Responses[1].Args)
+	}
+}

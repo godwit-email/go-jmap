@@ -20,25 +20,118 @@ import (
 func (s *Server) AddEmail(mailboxIDs []jmap.ID, raw []byte, keywords ...string) jmap.ID {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e := parseEmail(raw)
-	e.ID = s.newID("e")
-	e.ThreadID = e.ID
-	e.BlobID = s.newID("b")
-	s.blobs[e.BlobID] = raw
-	e.MailboxIDs = map[jmap.ID]bool{}
+	mboxes := map[jmap.ID]bool{}
 	for _, id := range mailboxIDs {
-		e.MailboxIDs[id] = true
+		mboxes[id] = true
 	}
-	e.Keywords = map[string]bool{}
+	kws := map[string]bool{}
 	for _, k := range keywords {
-		e.Keywords[k] = true
+		kws[k] = true
 	}
-	now := time.Now().UTC()
-	e.ReceivedAt = &now
-	s.emails = append(s.emails, e)
-	s.record("Email", e.ID, created)
+	blobID := s.newID("b")
+	s.blobs[blobID] = raw
+	e := s.addEmail(blobID, mboxes, kws, time.Now().UTC())
 	s.typeState["EmailDelivery"] = s.modseq
 	return e.ID
+}
+
+// addEmail stores the message held in blob blobID, with the lock held.
+func (s *Server) addEmail(blobID jmap.ID, mboxes map[jmap.ID]bool, kws map[string]bool, receivedAt time.Time) *email.Email {
+	e := parseEmail(s.blobs[blobID])
+	e.ID = s.newID("e")
+	e.ThreadID = e.ID
+	e.BlobID = blobID
+	e.MailboxIDs = mboxes
+	if kws == nil {
+		kws = map[string]bool{}
+	}
+	e.Keywords = kws
+	e.ReceivedAt = &receivedAt
+	s.emails = append(s.emails, e)
+	s.record("Email", e.ID, created)
+	return e
+}
+
+// emailImport implements Email/import (RFC 8621 section 4.8).
+func (s *Server) emailImport(args *email.Import) (*email.ImportResponse, *jmap.MethodError) {
+	old := s.stateOf("Email")
+	if args.IfInState != "" && args.IfInState != old {
+		return nil, methodErr("stateMismatch")
+	}
+	resp := &email.ImportResponse{Account: accountID, OldState: old}
+	for key, imp := range args.Emails {
+		serr := s.checkImport(imp)
+		if serr != nil {
+			if resp.NotCreated == nil {
+				resp.NotCreated = map[jmap.ID]*jmap.SetError{}
+			}
+			resp.NotCreated[jmap.ID(key)] = serr
+			continue
+		}
+		at := time.Now().UTC()
+		if imp.ReceivedAt != nil {
+			at = imp.ReceivedAt.UTC()
+		}
+		kws := map[string]bool{}
+		for k, v := range imp.Keywords {
+			if v {
+				kws[k] = true
+			}
+		}
+		mboxes := map[jmap.ID]bool{}
+		for m := range imp.MailboxIDs {
+			mboxes[m] = true
+		}
+		e := s.addEmail(imp.BlobID, mboxes, kws, at)
+		if resp.Created == nil {
+			resp.Created = map[jmap.ID]*email.Email{}
+		}
+		resp.Created[jmap.ID(key)] = &email.Email{ID: e.ID, BlobID: e.BlobID, ThreadID: e.ThreadID, Size: e.Size}
+	}
+	resp.NewState = s.stateOf("Email")
+	return resp, nil
+}
+
+func (s *Server) checkImport(imp *email.EmailImport) *jmap.SetError {
+	if imp == nil {
+		return setErr("invalidProperties")
+	}
+	if _, ok := s.blobs[imp.BlobID]; !ok {
+		return setErr("blobNotFound")
+	}
+	if len(imp.MailboxIDs) == 0 {
+		return setErr("invalidProperties", "mailboxIds")
+	}
+	for m := range imp.MailboxIDs {
+		if s.mailbox(m) == nil {
+			return setErr("invalidProperties", "mailboxIds")
+		}
+	}
+	return nil
+}
+
+// serveUpload serves /jmap/upload/{accountId} (RFC 8620 section 6.1).
+func (s *Server) serveUpload(w http.ResponseWriter, r *http.Request) {
+	if jmap.ID(strings.TrimPrefix(r.URL.Path, "/jmap/upload/")) != accountID {
+		http.NotFound(w, r)
+		return
+	}
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSizeUpload))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+		return
+	}
+	typ := r.Header.Get("Content-Type")
+	if typ == "" {
+		typ = "application/octet-stream"
+	}
+	s.mu.Lock()
+	id := s.newID("b")
+	s.blobs[id] = b
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(&jmap.UploadResponse{Account: accountID, ID: id, Type: typ, Size: uint64(len(b))})
 }
 
 // parseEmail fills the header-derived properties; bodies are only served as

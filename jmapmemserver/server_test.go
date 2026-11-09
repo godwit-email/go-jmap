@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -318,5 +319,47 @@ func TestEmptyQueryFeedsResultReference(t *testing.T) {
 	}
 	if gr, ok := resp.Responses[1].Args.(*email.GetResponse); !ok || len(gr.List) != 0 {
 		t.Fatalf("Email/get = %#v", resp.Responses[1].Args)
+	}
+}
+
+func TestUploadAndImport(t *testing.T) {
+	s := jmapmemserver.New("alice", "secret")
+	defer s.Close()
+	sent := s.CreateMailbox("Sent", mailbox.RoleSent)
+
+	c := newClient(t, s)
+	up, err := c.Upload(s.AccountID(), strings.NewReader(msg1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.Account != s.AccountID() || up.ID == "" || up.Size != uint64(len(msg1)) {
+		t.Fatalf("upload = %+v", up)
+	}
+	at := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	ir := do(t, c, &email.Import{Account: s.AccountID(), Emails: map[string]*email.EmailImport{
+		"k1": {BlobID: up.ID, MailboxIDs: map[jmap.ID]bool{sent: true}, Keywords: map[string]bool{"$seen": true}, ReceivedAt: &at},
+		"k2": {BlobID: "nope", MailboxIDs: map[jmap.ID]bool{sent: true}},
+		"k3": {BlobID: up.ID, MailboxIDs: map[jmap.ID]bool{"nope": true}},
+	}})[0].Args.(*email.ImportResponse)
+	if ir.NotCreated["k2"] == nil || ir.NotCreated["k2"].Type != "blobNotFound" ||
+		ir.NotCreated["k3"] == nil || ir.NotCreated["k3"].Type != "invalidProperties" {
+		t.Fatalf("notCreated = %+v", ir.NotCreated)
+	}
+	created := ir.Created["k1"]
+	if created == nil || created.ID == "" || created.BlobID != up.ID || ir.OldState == ir.NewState {
+		t.Fatalf("Email/import = %+v", ir)
+	}
+
+	e := do(t, c, &email.Get{Account: s.AccountID(), IDs: []jmap.ID{created.ID}})[0].Args.(*email.GetResponse).List[0]
+	if !e.MailboxIDs[sent] || !e.Keywords["$seen"] || !e.ReceivedAt.Equal(at) || e.Subject != "café" {
+		t.Fatalf("imported email = %+v", e)
+	}
+	rc, err := c.Download(s.AccountID(), e.BlobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if b, _ := io.ReadAll(rc); string(b) != msg1 {
+		t.Fatalf("blob = %q", b)
 	}
 }

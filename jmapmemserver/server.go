@@ -3,7 +3,8 @@
 // It serves one account over HTTP (net/http/httptest) and covers the subset
 // of RFC 8620 and RFC 8621 a mail client needs to sync: the session resource,
 // Mailbox/get, Mailbox/changes, Email/get, Email/query, Email/changes,
-// Email/set (mailboxIds, keywords, destroy), blob download and EventSource.
+// Email/set (mailboxIds, keywords, destroy), Email/import, blob upload and
+// download, and EventSource.
 // Hook methods on Server inject server-side changes and faults.
 package jmapmemserver
 
@@ -24,7 +25,10 @@ import (
 	"git.sr.ht/~rockorager/go-jmap/mail/mailbox"
 )
 
-const accountID jmap.ID = "a1"
+const (
+	accountID     jmap.ID = "a1"
+	maxSizeUpload         = 50 << 20
+)
 
 // Server is an in-memory JMAP server holding a single account.
 type Server struct {
@@ -125,6 +129,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.serveAPI(w, r)
 	case r.URL.Path == "/jmap/eventsource":
 		s.serveEventSource(w, r)
+	case strings.HasPrefix(r.URL.Path, "/jmap/upload/") && r.Method == http.MethodPost:
+		s.serveUpload(w, r)
 	case strings.HasPrefix(r.URL.Path, "/jmap/download/"):
 		s.serveDownload(w, r)
 	default:
@@ -140,7 +146,7 @@ func (s *Server) serveSession(w http.ResponseWriter) {
 	raw := func(v any) json.RawMessage { b, _ := json.Marshal(v); return b }
 	caps := map[jmap.URI]json.RawMessage{
 		jmap.CoreURI: raw(&core.Core{
-			MaxSizeUpload: 50 << 20, MaxConcurrentUpload: 4, MaxSizeRequest: 10 << 20,
+			MaxSizeUpload: maxSizeUpload, MaxConcurrentUpload: 4, MaxSizeRequest: 10 << 20,
 			MaxConcurrentRequests: 4, MaxCallsInRequest: 16, MaxObjectsInGet: 500, MaxObjectsInSet: 500,
 			CollationAlgorithms: []jmap.CollationAlgo{jmap.ASCIICasemap},
 		}),
@@ -235,6 +241,12 @@ func (s *Server) call(name string, raw json.RawMessage) (any, *jmap.MethodError)
 			return nil, methodErr("invalidArguments")
 		}
 		return s.emailSet(&args)
+	case "Email/import":
+		var args email.Import
+		if json.Unmarshal(raw, &args) != nil {
+			return nil, methodErr("invalidArguments")
+		}
+		return s.emailImport(&args)
 	case "Email/changes":
 		var args email.Changes
 		if json.Unmarshal(raw, &args) != nil {

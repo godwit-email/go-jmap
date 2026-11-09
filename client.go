@@ -229,7 +229,8 @@ func (c *Client) UploadWithContext(
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	// RFC 8620 section 6.1 says 201; accept 200 from older servers.
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		return nil, decodeHttpError(resp)
 	}
 

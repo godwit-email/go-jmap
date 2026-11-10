@@ -59,4 +59,8 @@ type SetError struct {
 	// Properties is available on InvalidProperties SetErrors and lists the
 	// individual properties were
 	Properties *[]string `json:"properties,omitempty"`
+
+	// InvalidRecipients is present on invalidRecipients SetErrors from
+	// EmailSubmission/set (RFC 8621 §7.5).
+	InvalidRecipients *[]string `json:"invalidRecipients,omitempty"`
 }

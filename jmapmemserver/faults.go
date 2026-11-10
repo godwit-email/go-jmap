@@ -5,6 +5,7 @@ import (
 
 	"git.sr.ht/~rockorager/go-jmap"
 	"git.sr.ht/~rockorager/go-jmap/mail/email"
+	"git.sr.ht/~rockorager/go-jmap/mail/identity"
 )
 
 // MergeEmails replaces the given emails with one new email under a new id,
@@ -49,6 +50,13 @@ func (s *Server) RejectNextRequest() {
 	s.rejectNext = true
 }
 
+// SetPassword changes the server's accepted password or Bearer token.
+func (s *Server) SetPassword(password string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.password = password
+}
+
 // SeparateDownloadHost starts a second listener and points the session's
 // downloadUrl at it, so downloads go to a different host:port than the API.
 // It returns the new host's base URL. Close stops it too.
@@ -72,4 +80,77 @@ func (s *Server) Redirect(path, location string) {
 	} else {
 		s.redirects[path] = location
 	}
+}
+
+// SeparateUploadHost starts a second listener and points the session's
+// uploadUrl at it, so uploads go to a different host:port than the API.
+// It returns the new host's base URL. Close stops it too.
+func (s *Server) SeparateUploadHost() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.upSrv == nil {
+		s.upSrv = httptest.NewServer(s)
+		s.sessionState++
+	}
+	return s.upSrv.URL
+}
+
+// DisableSubmission removes urn:ietf:params:jmap:submission from the session
+// and causes Identity/get and EmailSubmission/set to fail.
+func (s *Server) DisableSubmission() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noSubmission = true
+	s.sessionState++
+}
+
+// SetIdentities replaces the account's sending identities with one Identity
+// per email address (for example "alice@example.com", "*@example.com", or "*").
+func (s *Server) SetIdentities(emails ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.identities = nil
+	for _, addr := range emails {
+		s.identities = append(s.identities, &identity.Identity{
+			ID:    s.newID("i"),
+			Name:  s.username,
+			Email: addr,
+		})
+	}
+	s.typeState["Identity"] = s.modseq + 1
+	s.modseq++
+}
+
+// RefuseRecipient marks an envelope recipient address to be rejected with
+// invalidRecipients by EmailSubmission/set.
+func (s *Server) RefuseRecipient(rcpt string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refusedRcpts[rcpt] = true
+}
+
+// FailNextSubmission makes the next EmailSubmission/set creation fail with
+// err in notCreated.
+func (s *Server) FailNextSubmission(err *jmap.SetError) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failNextSub = err
+}
+
+// LoseNextSubmission makes the next HTTP request carrying EmailSubmission/set
+// process the submission on the server and then drop the TCP connection
+// without writing an HTTP response.
+func (s *Server) LoseNextSubmission() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loseNextSub = true
+}
+
+// StatusNextSubmission makes the next HTTP request carrying
+// EmailSubmission/set reply with the given HTTP status code instead of a JMAP
+// response.
+func (s *Server) StatusNextSubmission(code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.statusNextSub = code
 }

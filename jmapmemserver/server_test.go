@@ -12,6 +12,8 @@ import (
 	"git.sr.ht/~rockorager/go-jmap/core/push"
 	"git.sr.ht/~rockorager/go-jmap/jmapmemserver"
 	"git.sr.ht/~rockorager/go-jmap/mail/email"
+	"git.sr.ht/~rockorager/go-jmap/mail/emailsubmission"
+	"git.sr.ht/~rockorager/go-jmap/mail/identity"
 	"git.sr.ht/~rockorager/go-jmap/mail/mailbox"
 )
 
@@ -361,5 +363,165 @@ func TestUploadAndImport(t *testing.T) {
 	defer rc.Close()
 	if b, _ := io.ReadAll(rc); string(b) != msg1 {
 		t.Fatalf("blob = %q", b)
+	}
+}
+
+func TestIdentityAndEmailSubmission(t *testing.T) {
+	s := jmapmemserver.New("alice@example.com", "secret")
+	defer s.Close()
+	drafts := s.CreateMailbox("Drafts", mailbox.RoleDrafts)
+	sent := s.CreateMailbox("Sent", mailbox.RoleSent)
+	upHost := s.SeparateUploadHost()
+
+	c := (&jmap.Client{SessionEndpoint: s.URL() + "/.well-known/jmap"}).WithBasicAuth("alice@example.com", "secret")
+	if err := c.Authenticate(); err != nil {
+		t.Fatal(err)
+	}
+	gotUp, _ := url.Parse(c.Session.UploadURL)
+	wantUp, _ := url.Parse(upHost)
+	if gotUp.Host != wantUp.Host {
+		t.Fatalf("uploadUrl %q, want host %q", c.Session.UploadURL, wantUp.Host)
+	}
+
+	ids := do(t, c, &identity.Get{Account: s.AccountID()})[0].Args.(*identity.GetResponse)
+	if len(ids.List) != 1 || ids.List[0].Email != "alice@example.com" {
+		t.Fatalf("Identity/get = %+v", ids.List)
+	}
+	idID := ids.List[0].ID
+
+	const outMsg = "From: Alice <alice@example.com>\r\nTo: bob@example.com\r\nSubject: hi\r\n\r\nhello\r\n"
+	up, err := c.Upload(s.AccountID(), strings.NewReader(outMsg))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := &jmap.Request{}
+	req.Invoke(&email.Import{Account: s.AccountID(), Emails: map[string]*email.EmailImport{
+		"m": {BlobID: up.ID, MailboxIDs: map[jmap.ID]bool{drafts: true}, Keywords: map[string]bool{"$seen": true, "$draft": true}},
+	}})
+	subCall := req.Invoke(&emailsubmission.Set{
+		Account: s.AccountID(),
+		Create: map[jmap.ID]*emailsubmission.EmailSubmission{
+			"s": {
+				IdentityID: idID,
+				EmailID:    "#m",
+				Envelope: &emailsubmission.Envelope{
+					MailFrom: &emailsubmission.Address{Email: "alice@example.com"},
+					RcptTo: []*emailsubmission.Address{
+						{Email: "bob@example.com"},
+						{Email: "bcc@example.com"},
+					},
+				},
+			},
+		},
+		OnSuccessUpdateEmail: map[jmap.ID]jmap.Patch{
+			"#s": {
+				"mailboxIds/" + string(drafts): nil,
+				"mailboxIds/" + string(sent):   true,
+				"keywords/$draft":              nil,
+			},
+		},
+	})
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Responses) != 3 {
+		t.Fatalf("got %d responses, want 3", len(resp.Responses))
+	}
+	ir := resp.Responses[0].Args.(*email.ImportResponse)
+	emailID := ir.Created["m"].ID
+	sr := resp.Responses[1].Args.(*emailsubmission.SetResponse)
+	if sr.Created["s"] == nil || sr.Created["s"].ID == "" {
+		t.Fatalf("EmailSubmission/set = %+v", sr)
+	}
+	if resp.Responses[2].Name != "Email/set" || resp.Responses[2].CallID != subCall {
+		t.Fatalf("implicit Email/set invocation = %+v", resp.Responses[2])
+	}
+	es := resp.Responses[2].Args.(*email.SetResponse)
+	if _, ok := es.Updated[emailID]; !ok {
+		t.Fatalf("implicit Email/set updated = %+v", es)
+	}
+
+	stored := do(t, c, &email.Get{Account: s.AccountID(), IDs: []jmap.ID{emailID}})[0].Args.(*email.GetResponse).List[0]
+	if stored.MailboxIDs[drafts] || !stored.MailboxIDs[sent] || stored.Keywords["$draft"] || !stored.Keywords["$seen"] {
+		t.Fatalf("stored email after send = %+v", stored)
+	}
+	subs := s.Submissions()
+	if len(subs) != 1 || subs[0].MailFrom != "alice@example.com" || len(subs[0].RcptTo) != 2 ||
+		subs[0].RcptTo[1] != "bcc@example.com" || string(subs[0].Raw) != outMsg {
+		t.Fatalf("submissions = %+v", subs)
+	}
+
+	// Refused recipient returns invalidRecipients and leaves email untouched.
+	s.RefuseRecipient("bad@example.com")
+	up2, _ := c.Upload(s.AccountID(), strings.NewReader(outMsg))
+	req2 := &jmap.Request{}
+	req2.Invoke(&email.Import{Account: s.AccountID(), Emails: map[string]*email.EmailImport{
+		"m": {BlobID: up2.ID, MailboxIDs: map[jmap.ID]bool{drafts: true}, Keywords: map[string]bool{"$draft": true}},
+	}})
+	req2.Invoke(&emailsubmission.Set{
+		Account: s.AccountID(),
+		Create: map[jmap.ID]*emailsubmission.EmailSubmission{
+			"s": {
+				IdentityID: idID,
+				EmailID:    "#m",
+				Envelope: &emailsubmission.Envelope{
+					MailFrom: &emailsubmission.Address{Email: "alice@example.com"},
+					RcptTo:   []*emailsubmission.Address{{Email: "bad@example.com"}},
+				},
+			},
+		},
+		OnSuccessUpdateEmail: map[jmap.ID]jmap.Patch{"#s": {"keywords/$draft": nil}},
+	})
+	resp2, err := c.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp2.Responses) != 2 {
+		t.Fatalf("failed submission got %d responses, want 2", len(resp2.Responses))
+	}
+	sr2 := resp2.Responses[1].Args.(*emailsubmission.SetResponse)
+	if sr2.NotCreated["s"] == nil || sr2.NotCreated["s"].Type != "invalidRecipients" {
+		t.Fatalf("refused submission = %+v", sr2.NotCreated)
+	}
+	if len(s.Submissions()) != 1 {
+		t.Fatalf("submissions count = %d, want 1", len(s.Submissions()))
+	}
+
+	// LoseNextSubmission accepts the submission and drops the HTTP response.
+	s.LoseNextSubmission()
+	up3, _ := c.Upload(s.AccountID(), strings.NewReader(outMsg))
+	req3 := &jmap.Request{}
+	req3.Invoke(&email.Import{Account: s.AccountID(), Emails: map[string]*email.EmailImport{
+		"m": {BlobID: up3.ID, MailboxIDs: map[jmap.ID]bool{sent: true}, Keywords: map[string]bool{"$seen": true}},
+	}})
+	req3.Invoke(&emailsubmission.Set{
+		Account: s.AccountID(),
+		Create: map[jmap.ID]*emailsubmission.EmailSubmission{
+			"s": {
+				IdentityID: idID,
+				EmailID:    "#m",
+				Envelope: &emailsubmission.Envelope{
+					MailFrom: &emailsubmission.Address{Email: "alice@example.com"},
+					RcptTo:   []*emailsubmission.Address{{Email: "bob@example.com"}},
+				},
+			},
+		},
+	})
+	if _, err := c.Do(req3); err == nil {
+		t.Fatal("LoseNextSubmission returned a response, want dropped connection")
+	}
+	if len(s.Submissions()) != 2 {
+		t.Fatalf("submissions count after LoseNextSubmission = %d, want 2", len(s.Submissions()))
+	}
+
+	// DisableSubmission removes the capability from the session.
+	s.DisableSubmission()
+	if err := c.Authenticate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Session.RawCapabilities[emailsubmission.URI]; ok {
+		t.Fatal("submission capability still present after DisableSubmission")
 	}
 }

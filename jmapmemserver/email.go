@@ -53,7 +53,7 @@ func (s *Server) addEmail(blobID jmap.ID, mboxes map[jmap.ID]bool, kws map[strin
 }
 
 // emailImport implements Email/import (RFC 8621 section 4.8).
-func (s *Server) emailImport(args *email.Import) (*email.ImportResponse, *jmap.MethodError) {
+func (s *Server) emailImport(args *email.Import, createdIDs map[jmap.ID]jmap.ID) (*email.ImportResponse, *jmap.MethodError) {
 	old := s.stateOf("Email")
 	if args.IfInState != "" && args.IfInState != old {
 		return nil, methodErr("stateMismatch")
@@ -83,6 +83,9 @@ func (s *Server) emailImport(args *email.Import) (*email.ImportResponse, *jmap.M
 			mboxes[m] = true
 		}
 		e := s.addEmail(imp.BlobID, mboxes, kws, at)
+		if createdIDs != nil {
+			createdIDs[jmap.ID(key)] = e.ID
+		}
 		if resp.Created == nil {
 			resp.Created = map[jmap.ID]*email.Email{}
 		}
@@ -155,7 +158,7 @@ func parseEmail(raw []byte) *email.Email {
 		}
 		return out
 	}
-	e.From, e.To, e.CC, e.ReplyTo, e.Sender = addrs("From"), addrs("To"), addrs("Cc"), addrs("Reply-To"), addrs("Sender")
+	e.From, e.To, e.CC, e.BCC, e.ReplyTo, e.Sender = addrs("From"), addrs("To"), addrs("Cc"), addrs("Bcc"), addrs("Reply-To"), addrs("Sender")
 	e.MessageID, e.InReplyTo, e.References = msgIDs(h.Get("Message-Id")), msgIDs(h.Get("In-Reply-To")), msgIDs(h.Get("References"))
 	if d, err := h.Date(); err == nil {
 		d = d.UTC()
